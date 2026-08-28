@@ -12,8 +12,10 @@
 //   BANCO_DIR            carpeta persistente del banco (ej. /data en un volumen)
 
 import express from "express";
+import fs from "node:fs";
+import path from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { createServer, BANK_ROOT } from "./server-core.mjs";
+import { createServer, BANK_ROOT, findLedgerEntry } from "./server-core.mjs";
 
 const PORT = Number(process.env.PORT) || 8787;
 const TOKEN = process.env.MCP_TOKEN;
@@ -37,7 +39,7 @@ function authorized(req) {
 
 // Comprobación de vida (sin datos sensibles)
 app.get("/salud", (_req, res) => {
-  res.json({ ok: true, servicio: "banco-imagenes", version: "1.1.0" });
+  res.json({ ok: true, servicio: "banco-imagenes", version: "1.2.0" });
 });
 
 // Modo "stateless": una instancia de servidor MCP por petición — simple y robusto
@@ -73,6 +75,24 @@ async function handleMcp(req, res) {
 
 app.post("/mcp/:token", handleMcp);
 app.post("/mcp", handleMcp);
+
+// Ver/descargar un archivo del banco por su id del ledger (videos e imágenes)
+const FILE_MIMES = {
+  ".mp4": "video/mp4", ".webm": "video/webm",
+  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"
+};
+app.get("/archivo/:token/:id", (req, res) => {
+  if (req.params.token !== TOKEN) return res.status(401).send("No autorizado");
+  const entry = findLedgerEntry(req.params.id);
+  if (!entry) return res.status(404).send("No existe ese id en el banco");
+  const fp = path.join(BANK_ROOT, entry.file);
+  if (!fs.existsSync(fp)) return res.status(404).send("El archivo ya no está en el banco");
+  const mime = FILE_MIMES[path.extname(fp).toLowerCase()] || "application/octet-stream";
+  res.setHeader("Content-Type", mime);
+  res.setHeader("Content-Length", fs.statSync(fp).size);
+  res.setHeader("Content-Disposition", `inline; filename="${path.basename(fp)}"`);
+  fs.createReadStream(fp).pipe(res);
+});
 
 // En modo stateless no hay sesiones que reanudar ni cerrar
 const notAllowed = (_req, res) =>

@@ -52,7 +52,47 @@ const DEFAULT_CONFIG = {
     gpt: "openai/gpt-5-image",
     "gpt-mini": "openai/gpt-5-image-mini"
   },
-  max_refs: 4
+  max_refs: 4,
+  default_video_model: "seedance",
+  video_models: {
+    seedance: {
+      label: "Seedance 1.0 Pro — publicidad de alto nivel, 1080p",
+      t2v: "fal-ai/bytedance/seedance/v1/pro/text-to-video",
+      i2v: "fal-ai/bytedance/seedance/v1/pro/image-to-video",
+      style: "seedance", usd_5s: 0.74, resolution: "1080p"
+    },
+    "seedance-lite": {
+      label: "Seedance 1.0 Lite — rápido y barato para explorar, 720p",
+      t2v: "fal-ai/bytedance/seedance/v1/lite/text-to-video",
+      i2v: "fal-ai/bytedance/seedance/v1/lite/image-to-video",
+      style: "seedance", usd_5s: 0.18, resolution: "720p"
+    },
+    "seedance-2": {
+      label: "Seedance 2.0 — última generación, admite imágenes de referencia",
+      t2v: "bytedance/seedance-2.0/text-to-video",
+      i2v: "bytedance/seedance-2.0/image-to-video",
+      ref: "bytedance/seedance-2.0/reference-to-video",
+      style: "seedance2", usd_5s: 1.0, resolution: "1080p"
+    },
+    veo: {
+      label: "Veo 3 Fast — 8s CON AUDIO generado, muy realista",
+      t2v: "fal-ai/veo3/fast",
+      i2v: "fal-ai/veo3/fast/image-to-video",
+      style: "veo", usd_5s: 0.8, resolution: "720p"
+    },
+    "veo-pro": {
+      label: "Veo 3 completo — MÁXIMO fotorrealismo + audio (voces, ambiente); el que menos 'parece IA'",
+      t2v: "fal-ai/veo3",
+      i2v: "fal-ai/veo3/image-to-video",
+      style: "veo", usd_5s: 4.0, resolution: "1080p"
+    },
+    kling: {
+      label: "Kling 2.1 Standard — movimiento cinematográfico económico",
+      t2v: "fal-ai/kling-video/v2.1/standard/text-to-video",
+      i2v: "fal-ai/kling-video/v2.1/standard/image-to-video",
+      style: "kling", usd_5s: 0.25, resolution: "720p"
+    }
+  }
 };
 
 function loadConfig() {
@@ -102,6 +142,9 @@ function readLedger() {
 }
 function appendLedger(entry) {
   fs.appendFileSync(LEDGER_FILE, JSON.stringify(entry) + "\n");
+}
+export function findLedgerEntry(id) {
+  return readLedger().find((e) => e.id === id) || null;
 }
 function spentOn(datePrefix) {
   return readLedger()
@@ -314,6 +357,161 @@ function loadBrand(name) {
 }
 
 // ---------------------------------------------------------------------------
+// fal.ai — generación de VIDEO (Seedance, Veo, Kling…)
+// ---------------------------------------------------------------------------
+const VIDEO_DIR = path.join(BANK_ROOT, "videos");
+const PENDING_FILE = path.join(VIDEO_DIR, "pendientes.jsonl");
+fs.mkdirSync(VIDEO_DIR, { recursive: true });
+
+function falKey() {
+  const k = process.env.FAL_KEY;
+  if (!k) {
+    throw new Error(
+      "Falta FAL_KEY (la API key de fal.ai para video). Créala en fal.ai/dashboard/keys, " +
+        "añádela al .env local y a las variables de entorno de EasyPanel, y redespliega."
+    );
+  }
+  return k;
+}
+
+function resolveVideoModel(nameOrEndpoint) {
+  const models = config.video_models || {};
+  const key = (nameOrEndpoint || config.default_video_model || "seedance").toLowerCase();
+  if (models[key]) return { alias: key, ...models[key] };
+  // endpoint id de fal pasado a mano: se usa tal cual, coste estimado genérico
+  return { alias: nameOrEndpoint, t2v: nameOrEndpoint, i2v: nameOrEndpoint, style: "seedance", usd_5s: 0.5, resolution: "720p" };
+}
+
+function estimateVideoCost(model, duration) {
+  return Number((model.usd_5s * (Math.max(1, duration) / 5)).toFixed(4));
+}
+
+function buildVideoBody(model, { prompt, imageDataUrl, refDataUrls, duration, aspect_ratio, resolution }) {
+  const body = { prompt };
+  const res = resolution || model.resolution;
+  if (model.style === "veo") {
+    body.duration = "8s";
+    body.generate_audio = true;
+    if (aspect_ratio) body.aspect_ratio = aspect_ratio;
+    if (imageDataUrl) body.image_url = imageDataUrl;
+  } else if (model.style === "kling") {
+    body.duration = String(duration);
+    if (aspect_ratio) body.aspect_ratio = aspect_ratio;
+    if (imageDataUrl) body.image_url = imageDataUrl;
+  } else {
+    // familia seedance
+    body.duration = String(duration);
+    if (res) body.resolution = res;
+    if (imageDataUrl) body.image_url = imageDataUrl;
+    else if (aspect_ratio) body.aspect_ratio = aspect_ratio;
+    if (model.style === "seedance2" && refDataUrls?.length) body.reference_image_urls = refDataUrls;
+  }
+  return body;
+}
+
+async function falSubmit(endpoint, body) {
+  const res = await fetch(`https://queue.fal.run/${endpoint}`, {
+    method: "POST",
+    headers: { Authorization: `Key ${falKey()}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60000)
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    const msg = json?.detail ? JSON.stringify(json.detail).slice(0, 400) : res.statusText;
+    throw new Error(`fal.ai ${res.status} en ${endpoint}: ${msg}`);
+  }
+  return {
+    request_id: json.request_id,
+    status_url: json.status_url || `https://queue.fal.run/${endpoint}/requests/${json.request_id}/status`,
+    response_url: json.response_url || `https://queue.fal.run/${endpoint}/requests/${json.request_id}`
+  };
+}
+
+async function falCheck(job) {
+  const auth = { Authorization: `Key ${falKey()}` };
+  const st = await fetch(job.status_url, { headers: auth, signal: AbortSignal.timeout(30000) });
+  const status = await st.json().catch(() => ({}));
+  if (status.status !== "COMPLETED") {
+    if (st.status >= 400) throw new Error(`fal.ai estado ${st.status}: ${JSON.stringify(status).slice(0, 300)}`);
+    return { done: false, status: status.status || "IN_PROGRESS", queue: status.queue_position };
+  }
+  const rs = await fetch(job.response_url, { headers: auth, signal: AbortSignal.timeout(60000) });
+  const result = await rs.json().catch(() => null);
+  if (!rs.ok) throw new Error(`fal.ai resultado ${rs.status}: ${JSON.stringify(result).slice(0, 300)}`);
+  const videoUrl = result?.video?.url || result?.videos?.[0]?.url || result?.url;
+  if (!videoUrl) throw new Error(`fal.ai terminó pero sin video: ${JSON.stringify(result).slice(0, 300)}`);
+  return { done: true, videoUrl };
+}
+
+async function downloadVideo(url, dir, baseName) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(300000) });
+  if (!res.ok) throw new Error(`No pude descargar el video (${res.status})`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length > 500 * 1024 * 1024) throw new Error("Video demasiado grande (>500MB)");
+  fs.mkdirSync(dir, { recursive: true });
+  let fp = path.join(dir, baseName + ".mp4");
+  let n = 2;
+  while (fs.existsSync(fp)) fp = path.join(dir, `${baseName}-${n++}.mp4`);
+  fs.writeFileSync(fp, buf);
+  return fp;
+}
+
+function readPending() {
+  if (!fs.existsSync(PENDING_FILE)) return [];
+  const out = [];
+  for (const line of fs.readFileSync(PENDING_FILE, "utf8").split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try { out.push(JSON.parse(line)); } catch {}
+  }
+  return out;
+}
+function writePending(jobs) {
+  fs.writeFileSync(PENDING_FILE, jobs.map((j) => JSON.stringify(j)).join("\n") + (jobs.length ? "\n" : ""));
+}
+
+function publicFileLink(id) {
+  const base = process.env.PUBLIC_URL;
+  const token = process.env.MCP_TOKEN;
+  if (!base || !token) return null;
+  return `${base.replace(/\/$/, "")}/archivo/${token}/${id}`;
+}
+
+// Guarda un video terminado: archivo + ledger. Devuelve la entrada del ledger.
+async function saveFinishedVideo(job, videoUrl) {
+  const folder = job.project ? path.join(VIDEO_DIR, slugify(job.project)) : path.join(VIDEO_DIR, todayStr());
+  const id = job.id || shortId();
+  const fp = await downloadVideo(videoUrl, folder, `${slugify(job.prompt)}-${id}`);
+  const rel = path.relative(BANK_ROOT, fp).replaceAll("\\", "/");
+  const entry = {
+    id,
+    ts: new Date().toISOString(),
+    date: todayStr(),
+    kind: "video",
+    model: job.alias,
+    endpoint: job.endpoint,
+    prompt: job.prompt,
+    duration: job.duration,
+    project: job.project || null,
+    parent: job.parent || null,
+    file: rel,
+    cost_usd: job.est_cost
+  };
+  appendLedger(entry);
+  return entry;
+}
+
+function videoResultText(entry) {
+  const link = publicFileLink(entry.id);
+  return (
+    `🎬 Video listo (${entry.model}, ${entry.duration}s)\n` +
+    `  [${entry.id}] ${entry.file}\n` +
+    `Coste estimado: $${Number(entry.cost_usd).toFixed(2)} · ${budgetLine()}` +
+    (link ? `\nVer/descargar: ${link}` : "")
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Construcción del servidor MCP (una instancia por conexión en modo HTTP)
 // ---------------------------------------------------------------------------
 function textResult(text) {
@@ -339,7 +537,7 @@ function budgetLine() {
 }
 
 export function createServer() {
-  const server = new McpServer({ name: "banco-imagenes", version: "1.1.0" });
+  const server = new McpServer({ name: "banco-imagenes", version: "1.2.0" });
 
   function registerTool(name, def, handler) {
     server.registerTool(name, def, async (args) => {
@@ -692,6 +890,166 @@ export function createServer() {
         return `• ${n} — ${b.refs.length} referencia(s)\n  ${excerpt}${b.manual.length > 120 ? "…" : ""}`;
       });
       return textResult(`Marcas configuradas (${names.length}):\n\n` + lines.join("\n\n"));
+    }
+  );
+
+  // --- generate_video -------------------------------------------------------
+  registerTool(
+    "generate_video",
+    {
+      title: "Generar video",
+      description:
+        "Genera un video publicitario con modelos de fal.ai. Alias: 'seedance' (Pro 1080p, por defecto), 'seedance-lite' " +
+        "(barato para explorar), 'seedance-2' (última generación, admite imágenes de referencia), 'veo' (8s CON audio), 'kling'. " +
+        "Puede partir de una imagen del banco (image-to-video: anima un post o foto) o de solo texto. Tarda 1-5 min: si no " +
+        "termina en ~1 min, queda en proceso y se recoge con video_status. Respeta el límite de gasto diario.",
+      inputSchema: {
+        prompt: z.string().min(1).describe("Qué debe pasar en el video: escena, movimiento de cámara, ritmo, ambiente"),
+        model: z.string().optional().describe("Alias ('seedance', 'seedance-lite', 'seedance-2', 'veo', 'kling') o endpoint de fal.ai"),
+        image: z.string().optional().describe("Id del ledger o ruta de una imagen del banco como fotograma inicial (image-to-video)"),
+        reference_images: z
+          .array(z.string())
+          .max(4)
+          .optional()
+          .describe("Solo seedance-2: ids/rutas de imágenes de referencia de estilo (reference-to-video)"),
+        duration: z.number().int().min(3).max(12).optional().describe("Segundos (5 o 10 típico; veo siempre 8). Por defecto 5"),
+        aspect_ratio: z.string().optional().describe("16:9, 9:16 (reels/stories), 1:1… (en image-to-video manda la imagen)"),
+        resolution: z.string().optional().describe("480p, 720p o 1080p según el modelo"),
+        brand: z.string().optional().describe("Marca de marcas/ para inyectar sus directrices en el prompt"),
+        project: z.string().optional().describe("Subcarpeta del proyecto donde guardar")
+      }
+    },
+    async (a) => {
+      const model = resolveVideoModel(a.model);
+      const duration = model.style === "veo" ? 8 : a.duration || 5;
+      const est = estimateVideoCost(model, duration);
+
+      const { limit, spent } = checkBudget();
+      if (spent + est > limit) {
+        throw new Error(
+          `Este video costaría ~$${est.toFixed(2)} y solo quedan $${(limit - spent).toFixed(2)} del presupuesto de hoy. ` +
+            `Sube el límite con set_daily_budget o usa seedance-lite.`
+        );
+      }
+
+      let promptText = a.prompt;
+      if (a.brand) {
+        const b = loadBrand(a.brand);
+        if (b.manual) promptText = `Directrices de marca (${b.name}):\n${b.manual.slice(0, 1500)}\n\n${a.prompt}`;
+      }
+
+      let imageDataUrl = null;
+      let parent = null;
+      if (a.image) {
+        const { filePath, entry } = resolveImageRef(a.image);
+        const { base64, mime } = await fileToJpegBase64(filePath, 1280);
+        imageDataUrl = `data:${mime};base64,${base64}`;
+        parent = entry?.id || null;
+      }
+      const refDataUrls = [];
+      for (const ref of a.reference_images || []) {
+        const { filePath } = resolveImageRef(ref);
+        const { base64, mime } = await fileToJpegBase64(filePath, 1024);
+        refDataUrls.push(`data:${mime};base64,${base64}`);
+      }
+
+      let endpoint = imageDataUrl ? model.i2v : model.t2v;
+      if (model.style === "seedance2" && refDataUrls.length && model.ref) endpoint = model.ref;
+
+      const body = buildVideoBody(model, {
+        prompt: promptText,
+        imageDataUrl,
+        refDataUrls,
+        duration,
+        aspect_ratio: a.aspect_ratio,
+        resolution: a.resolution
+      });
+
+      const submitted = await falSubmit(endpoint, body);
+      const job = {
+        id: shortId(),
+        request_id: submitted.request_id,
+        status_url: submitted.status_url,
+        response_url: submitted.response_url,
+        alias: model.alias,
+        endpoint,
+        prompt: a.prompt,
+        duration,
+        project: a.project || null,
+        parent,
+        est_cost: est,
+        ts: new Date().toISOString()
+      };
+
+      // Espera hasta ~70s; si no termina, queda pendiente para video_status
+      const deadline = Date.now() + 70000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 4000));
+        const check = await falCheck(job);
+        if (check.done) {
+          const entry = await saveFinishedVideo(job, check.videoUrl);
+          return textResult(videoResultText(entry));
+        }
+      }
+      writePending([...readPending(), job]);
+      return textResult(
+        `⏳ Video en proceso con ${model.alias} (id ${job.id}, ~$${est.toFixed(2)}). Suele tardar 1-5 minutos.\n` +
+          `Pídeme "estado de los videos" en un momento y lo recojo y guardo.`
+      );
+    }
+  );
+
+  // --- video_status ---------------------------------------------------------
+  registerTool(
+    "video_status",
+    {
+      title: "Estado de los videos",
+      description: "Revisa los videos en proceso: guarda los terminados en el banco y reporta los que siguen generándose.",
+      inputSchema: {}
+    },
+    async () => {
+      const pending = readPending();
+      if (!pending.length) return textResult("No hay videos en proceso. Los terminados aparecen con list_images (kind: video).");
+      const still = [];
+      const lines = [];
+      for (const job of pending) {
+        try {
+          const check = await falCheck(job);
+          if (check.done) {
+            const entry = await saveFinishedVideo(job, check.videoUrl);
+            lines.push(videoResultText(entry));
+          } else {
+            still.push(job);
+            lines.push(`⏳ [${job.id}] ${job.alias} · "${job.prompt.slice(0, 60)}" — ${check.status}${check.queue != null ? ` (cola: ${check.queue})` : ""}`);
+          }
+        } catch (err) {
+          lines.push(`❌ [${job.id}] falló: ${err.message.slice(0, 200)} (se descarta; no se anota coste)`);
+        }
+      }
+      writePending(still);
+      return textResult(lines.join("\n\n"));
+    }
+  );
+
+  // --- list_video_models ----------------------------------------------------
+  registerTool(
+    "list_video_models",
+    {
+      title: "Modelos de video disponibles",
+      description: "Lista los modelos de video configurados (fal.ai) con su coste estimado por clip.",
+      inputSchema: {}
+    },
+    async () => {
+      const models = config.video_models || {};
+      const lines = Object.entries(models).map(([alias, m]) => {
+        const def = alias === (config.default_video_model || "seedance") ? "  ★ por defecto" : "";
+        return `${alias} — ${m.label}\n    ~$${m.usd_5s.toFixed(2)} por clip de 5s (${m.resolution})${def}`;
+      });
+      return textResult(
+        `Modelos de video (vía fal.ai):\n\n${lines.join("\n")}\n\n` +
+          `Uso: generate_video con el alias, o con una imagen del banco para animarla (image-to-video). ` +
+          `Los costes son estimaciones configurables en config.json; fal.ai cobra de tu saldo prepago.`
+      );
     }
   );
 
