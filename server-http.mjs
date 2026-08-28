@@ -39,7 +39,7 @@ function authorized(req) {
 
 // Comprobación de vida (sin datos sensibles)
 app.get("/salud", (_req, res) => {
-  res.json({ ok: true, servicio: "banco-imagenes", version: "1.2.0" });
+  res.json({ ok: true, servicio: "banco-imagenes", version: "1.2.1" });
 });
 
 // Modo "stateless": una instancia de servidor MCP por petición — simple y robusto

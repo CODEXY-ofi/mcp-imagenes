@@ -74,6 +74,13 @@ const DEFAULT_CONFIG = {
       ref: "bytedance/seedance-2.0/reference-to-video",
       style: "seedance2", usd_5s: 1.0, resolution: "1080p"
     },
+    omni: {
+      label: "Gemini Omni Flash — multimodal de Google: audio nativo, edición conversacional y máxima fidelidad al prompt (3-10s, 16:9 o 9:16)",
+      t2v: "google/gemini-omni-flash",
+      i2v: "google/gemini-omni-flash/reference-to-video",
+      ref: "google/gemini-omni-flash/reference-to-video",
+      style: "omni", usd_5s: 0.6, resolution: "720p"
+    },
     veo: {
       label: "Veo 3 Fast — 8s CON AUDIO generado, muy realista",
       t2v: "fal-ai/veo3/fast",
@@ -97,7 +104,13 @@ const DEFAULT_CONFIG = {
 
 function loadConfig() {
   try {
-    return { ...DEFAULT_CONFIG, ...JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")) };
+    const file = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
+    const cfg = { ...DEFAULT_CONFIG, ...file };
+    // Merge profundo: así los modelos nuevos que lleguen por código nunca quedan
+    // ocultos por un config.json antiguo guardado en disco/volumen.
+    cfg.aliases = { ...DEFAULT_CONFIG.aliases, ...(file.aliases || {}) };
+    cfg.video_models = { ...DEFAULT_CONFIG.video_models, ...(file.video_models || {}) };
+    return cfg;
   } catch {
     return { ...DEFAULT_CONFIG };
   }
@@ -394,6 +407,13 @@ function buildVideoBody(model, { prompt, imageDataUrl, refDataUrls, duration, as
     body.generate_audio = true;
     if (aspect_ratio) body.aspect_ratio = aspect_ratio;
     if (imageDataUrl) body.image_url = imageDataUrl;
+  } else if (model.style === "omni") {
+    body.duration = Math.min(10, Math.max(3, duration));
+    if (aspect_ratio && ["16:9", "9:16"].includes(aspect_ratio)) body.aspect_ratio = aspect_ratio;
+    const urls = [];
+    if (imageDataUrl) urls.push(imageDataUrl);
+    if (refDataUrls?.length) urls.push(...refDataUrls);
+    if (urls.length) body.image_urls = urls;
   } else if (model.style === "kling") {
     body.duration = String(duration);
     if (aspect_ratio) body.aspect_ratio = aspect_ratio;
@@ -537,7 +557,7 @@ function budgetLine() {
 }
 
 export function createServer() {
-  const server = new McpServer({ name: "banco-imagenes", version: "1.2.0" });
+  const server = new McpServer({ name: "banco-imagenes", version: "1.2.1" });
 
   function registerTool(name, def, handler) {
     server.registerTool(name, def, async (args) => {
@@ -900,7 +920,8 @@ export function createServer() {
       title: "Generar video",
       description:
         "Genera un video publicitario con modelos de fal.ai. Alias: 'seedance' (Pro 1080p, por defecto), 'seedance-lite' " +
-        "(barato para explorar), 'seedance-2' (última generación, admite imágenes de referencia), 'veo' (8s CON audio), 'kling'. " +
+        "(barato para explorar), 'seedance-2' (última generación, admite imágenes de referencia), 'omni' (Gemini Omni Flash: " +
+        "audio nativo, máxima fidelidad al prompt, referencias), 'veo'/'veo-pro' (audio, fotorrealismo), 'kling'. " +
         "Puede partir de una imagen del banco (image-to-video: anima un post o foto) o de solo texto. Tarda 1-5 min: si no " +
         "termina en ~1 min, queda en proceso y se recoge con video_status. Respeta el límite de gasto diario.",
       inputSchema: {
@@ -954,7 +975,7 @@ export function createServer() {
       }
 
       let endpoint = imageDataUrl ? model.i2v : model.t2v;
-      if (model.style === "seedance2" && refDataUrls.length && model.ref) endpoint = model.ref;
+      if ((model.style === "seedance2" || model.style === "omni") && refDataUrls.length && model.ref) endpoint = model.ref;
 
       const body = buildVideoBody(model, {
         prompt: promptText,
