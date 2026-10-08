@@ -29,7 +29,29 @@ if (!TOKEN || TOKEN.length < 16) {
 }
 
 const app = express();
+
+// CORS: los clientes MCP remotos (claude.ai) lo exigen. Mcp-Session-Id tiene que
+// quedar expuesto o el cliente no puede leer la sesión y aborta la conexión.
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, Accept, Last-Event-ID, Mcp-Session-Id, MCP-Protocol-Version"
+  );
+  res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id, MCP-Protocol-Version");
+  res.setHeader("Access-Control-Max-Age", "86400");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
 app.use(express.json({ limit: "8mb" }));
+
+// Página de inicio mínima: evita el "Cannot GET /" y no revela nada.
+app.get("/", (_req, res) => {
+  res.json({ ok: true, servicio: "banco-imagenes", endpoint: "/mcp/<token>" });
+});
 
 function authorized(req) {
   if (req.params.token === TOKEN) return true;
